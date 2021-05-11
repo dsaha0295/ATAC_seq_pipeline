@@ -1,0 +1,94 @@
+---
+title: "ATAC_seq mCRPC quality control analysis - identify ATACseq samples with high quality for downstream analyssi"
+output: html_notebook
+author: Debanjan Saha
+---
+
+
+```{r}
+#Load libraries
+#library(DiffBind)
+library(tidyverse)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(clusterProfiler)
+library(ggpubr)
+library(pheatmap)
+library(viridis)
+```
+
+```{r}
+#Load QC table and merge with annotations
+atac_qc <- read.csv(file = "/Users/ds/Desktop/scratch/txt/ATAC_mCRPC_QC.csv",strip.white = T) %>% mutate(FrIP_batch = ntile(FrIP, 3))
+#rna_qc <- read.table(file = "/Users/ds/Desktop/scratch/txt/202009_deepRNAseq_sample_full.txt", header = T)
+
+```
+
+
+```{r}
+#Annotations of regions
+peakanno <- lapply(list.files(path = "/Users/ds/Desktop/scratch/Final_peaks/", pattern = ".narrowPeak", full.names = T), annotatePeak, TxDb = TxDb.Hsapiens.UCSC.hg38.knownGene)
+names(peakanno) <- list.files(path = "/Users/ds/Desktop/scratch/Final_peaks/", pattern = ".narrowPeak") %>% gsub(pattern = "_filtered.peaks.narrowPeak", replacement = "")
+
+#Loop over all annotated bedfiles in peakanno list, create mini df of sample name, features, and frequencies, then append to output - samples are in long format for plotting
+output = NULL
+for (i in c(1:length(peakanno))) {
+  output <- rbind(output, cbind(rep(names(peakanno[i]), length(peakanno[[i]]@annoStat$Frequency)), as.character(peakanno[[i]]@annoStat$Feature), as.numeric(peakanno[[i]]@annoStat$Frequency))) %>% as.data.frame()
+}
+#
+# #Merge with TSS scores for plotting in decreasing order
+colnames(output) <- c("Sample.ID", "Features", "Frequency")
+df <- merge(output, atac_qc[c("Sample.ID", "FrIP")])
+```
+
+
+```{r}
+#QC plots
+
+glist = list()
+#QC plot for all samples for Frip
+glist[[1]] <- ggplot(data = atac_qc, aes(x = reorder(Sample.ID, -FrIP), y = FrIP)) + geom_col(aes(fill = as.factor(FrIP_batch) , position = "dodge", width = 0.85), color = "black", alpha = atac_qc$Permutation_test) + theme(axis.text.x = element_blank(), legend.position = "none") + xlab(NULL) + scale_fill_viridis_d(end = 0.5) 
+
+#QC plot for all samples for Tss.score
+glist[[2]] <- ggplot(data = atac_qc, aes(x = reorder(Sample.ID, -FrIP), y = TSS.score)) + geom_col(aes( fill = as.factor(FrIP_batch), position = "dodge", width = 0.85), color = "black", alpha = atac_qc$Permutation_test) + scale_fill_viridis_d(end = 0.5) + theme(axis.text.x = element_blank(), legend.position = "none") + xlab(NULL) + ylab("TSS.score")
+
+#QC plot for all samples for Number of peaks 
+glist[[3]] <- ggplot(data = atac_qc, aes(x = reorder(Sample.ID, -FrIP), y = No..of.Peaks)) + geom_col(aes( fill = as.factor(FrIP_batch), position = "dodge", width = 0.85), color = "black", alpha = atac_qc$Permutation_test) + scale_fill_viridis_d(end = 0.5) + theme(axis.text.x = element_blank(), legend.position = "none") + xlab(NULL)
+
+#Plot for region annotations with UCSC hg38 
+glist[[4]] <- ggplot(df, aes(x = reorder(Sample.ID, -FrIP), y = as.numeric(Frequency), fill = Features)) + geom_bar(position = "stack", stat = "identity", width= 0.8, color = "black") + scale_y_continuous(name = "Frequency", limits = c(0,100)) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 8), legend.position = "none") + scale_fill_viridis_d() + xlab("Sample ID") 
+
+#Arrange vertically all together 
+ggarrange(plotlist = glist, ncol = 1, nrow = length(glist), align = "v")
+
+
+```
+
+
+```{r}
+#MC simulation for protein coding TSS - read in counts txt and calculate empirical p value
+pvals <- as.vector(NULL)
+mc <- list.files(path = "/Users/ds/Desktop/scratch/Permutation_Counts", full.names = T)
+for (i in c(1:length(mc))) {
+  d <- read.table(mc[i])
+  pvals[i] <- sum(d$V1 >= d$V1[1])/length(d$V1)
+  names(pvals)[i] <- gsub(".perm_counts.txt", "", gsub("/Users/ds/Desktop/scratch/Permutation_Counts/", "", mc[i]))
+}
+
+atac_qc <- data.frame(P.value = pvals, Sample.ID = names(pvals)) %>% merge(atac_qc)
+
+
+ggplot(atac_qc, aes(y  = Pvals, x = reorder(Sample.ID, -FrIP), fill = as.factor(FrIP_batch))) + geom_col() + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.7)) + scale_fill_viridis_d(name = "FrIP quality", labels = c("Low", "Medium", "High")) +  
+  ylab("Empirical p-value") + xlab("SampleID") + ggtitle("P values after 100 permutations") + 
+  geom_hline(yintercept = 0.05, color = "red")
+
+
+ggplot(atac_qc, aes(y = New.TSS.score, x = Pvals, color = as.factor(FrIP_batch), size = No..of.Peaks)) + geom_jitter(width = 0.1) + scale_color_viridis_d(name = "FrIP quality", labels = c("Low", "Medium", "High")) + ggtitle("P values after 100 permutations") +  ylab("TSS score") + xlab("P value")
+
+atac_qc <- mutate(atac_qc, Permutation_test = ifelse(Pvals < 0.05, 1, 0))
+
+
+atac_qc %>% select(c("Sample.ID", "TSS.score", "FrIP", "No..of.Peaks", "P.value", "Permutation_test")) %>% write.csv(file = "/Users/ds/Desktop/mCRPC_ATACseq_QC.csv", quote = F, sep = "\t", row.names = F)
+```
+
